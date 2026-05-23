@@ -206,14 +206,12 @@ them before the dart-live script loads:
   `AnalysisDriver.buildPackageBundle(uriList: [...])` from
   `package:analyzer/src/dart/analysis/driver.dart`.
 
-**Analyzer version pin.** The PackageBundle binary format is not stable
-across analyzer major versions. `dart_analyzer.wasm` is built against the
-in-tree `pkg/analyzer` from our SDK fork, currently version
-**`13.1.0-dev`**, not the `analyzer` package on pub. Pin your
-`build_summary.dart` to the same source via `dependency_overrides`
-pointing at `modulovalue/sdk` on the dart-live branch, otherwise
-`PackageBundleReader` will throw `Null check operator used on a null
-value` on a mismatched bundle.
+**Analyzer version pin.** The PackageBundle binary format breaks across
+analyzer major versions. `dart_analyzer.wasm` is built against the
+in-tree `pkg/analyzer` at **`13.1.0-dev`**, so pin your
+`build_summary.dart` to `analyzer: ^13.0.0` from pub. Older majors
+(`^8`, `^12`, etc.) will throw `Null check operator used on a null
+value` inside `PackageBundleReader` on a format mismatch.
 
 ## License
 
