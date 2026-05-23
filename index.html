@@ -1271,6 +1271,7 @@ const platformBytes = new Uint8Array(
 const packageDills = [];
 const pkgConfigs = globalThis.dartLivePackages ?? [];
 if (pkgConfigs.length > 0) {
+  status.innerHTML = '<span class="info">loading packages…</span>';
   const bufs = await Promise.all(
     pkgConfigs.map(p => fetch(p.dillUrl).then(r => r.arrayBuffer()))
   );
