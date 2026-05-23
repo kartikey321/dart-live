@@ -44,6 +44,7 @@ as you type.
 - [Samples](#samples)
 - [How it works](#how-it-works)
 - [Bundle](#bundle)
+- [External packages](#external-packages)
 - [License](#license)
 
 ## JavaScript interop
@@ -183,6 +184,36 @@ The browser pulls these files; no server is involved:
 | `dart_sdk.sum` | 3.2 MB | Analyzer SDK summary |
 
 Total: about 26 MB uncompressed, 7.6 MB gzipped.
+
+## External packages
+
+Embedders can ship pre-compiled packages alongside the bundle by declaring
+them before the dart-live script loads:
+
+```html
+<script>
+  window.dartLivePackages = [
+    { name: 'foo', dillUrl: './foo.dill', summaryUrl: './foo.sum' },
+  ];
+</script>
+```
+
+- `dillUrl` is required. Produce it on the host with
+  `dart compile kernel --platform=vm_platform.dill -o foo.dill lib/foo.dart`.
+  Resolves `package:foo/...` for the CFE and runs in the VM.
+- `summaryUrl` is optional. Without it the package imports compile and
+  run, but the analyzer pane red-underlines them. Build it by calling
+  `AnalysisDriver.buildPackageBundle(uriList: [...])` from
+  `package:analyzer/src/dart/analysis/driver.dart`.
+
+**Analyzer version pin.** The PackageBundle binary format is not stable
+across analyzer major versions. `dart_analyzer.wasm` is built against the
+in-tree `pkg/analyzer` from our SDK fork, currently version
+**`13.1.0-dev`**, not the `analyzer` package on pub. Pin your
+`build_summary.dart` to the same source via `dependency_overrides`
+pointing at `modulovalue/sdk` on the dart-live branch, otherwise
+`PackageBundleReader` will throw `Null check operator used on a null
+value` on a mismatched bundle.
 
 ## License
 
