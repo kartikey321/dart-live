@@ -147,8 +147,8 @@
     <option value="iterative">★ Iterative π (Hot Reload + Invoke)</option>
     <option value="life">★ Conway's Life (Hot Reload + Invoke)</option>
     <option value="particles">★ Bouncing particles (Hot Reload + Invoke)</option>
-    <option value="jsinterop">★ JavaScript interop (jsEval)</option>
-    <option value="canvas">★ Canvas drawing (jsEval)</option>
+    <option value="jsinterop">★ JavaScript interop (dart:js_interop)</option>
+    <option value="canvas">★ Canvas drawing (dart:js_interop)</option>
     <option value="counter">Counter</option>
     <option value="async">Async / Future.delayed</option>
     <option value="fib">Fibonacci</option>
@@ -271,43 +271,59 @@ const SAMPLES = {
   // sample shows passing Dart values to JS as a JSON-encoded args array
   // (visible inside the JS snippet as \`args\` / \`a\`), and getting values
   // back. Result is the JS expression's value, stringified.
-  jsinterop: `// Direct access to the host's JavaScript runtime from Dart.
-// Run once to register the bindings, then ▶ Invoke each example via the
-// CodeLens buttons above. Most of these poke the actual browser (alert,
-// prompt, document, localStorage) so you'll see real, obvious side effects.
+  jsinterop: `// JavaScript interop using the standard \`dart:js_interop\` /
+// \`dart:js_interop_unsafe\` libraries, the same surface \`package:web\` uses.
+// Every property access and method call below lowers to a Dart-VM-on-wasm
+// embedder native that drives the browser directly. Run once to register
+// the bindings, then ▶ Invoke each example via the CodeLens buttons above.
 
-import 'dart:convert';
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 
-@pragma("vm:external-name", "EmbedderJSEval")
-external String _jsEvalRaw(String code, String argsJson);
-
-/// Evaluate JS \`code\`. Pass Dart values in [args]; they're available inside
-/// the snippet as the array \`args\` (or its short alias \`a\`). The result
-/// is the stringified JS value; a leading "!" means JS threw.
-String jsEval(String code, [List<Object?> args = const []]) =>
-    _jsEvalRaw(code, jsonEncode(args));
+// Tiny helpers so the call sites read like the JS originals.
+JSObject get _window => globalContext;
+JSObject get _document =>
+    _window.getProperty<JSObject>('document'.toJS);
+JSObject get _navigator =>
+    _window.getProperty<JSObject>('navigator'.toJS);
+JSObject get _localStorage =>
+    _window.getProperty<JSObject>('localStorage'.toJS);
+JSObject get _Math =>
+    _window.getProperty<JSObject>('Math'.toJS);
+JSObject get _Intl =>
+    _window.getProperty<JSObject>('Intl'.toJS);
 
 // ============================================================
 // === 1. Visual proof that JS interop is REAL: native dialogs
 // ============================================================
 
 void showAlert() {
-  // Real browser alert() dialog. Blocks the page until you click OK.
-  jsEval('alert(a[0])', ['Hello from a Dart VM running in WebAssembly!']);
+  // window.alert(...) — blocks the page until you click OK.
+  _window.callMethod<JSAny?>(
+    'alert'.toJS,
+    'Hello from a Dart VM running in WebAssembly!'.toJS,
+  );
 }
 
 void askConfirm() {
-  // confirm() returns true/false; we get it back as a stringified bool.
-  final answer = jsEval('confirm(a[0])', ['Are you having fun?']);
+  // confirm() returns a JS boolean; convert it to a Dart bool.
+  final answer = _window
+      .callMethod<JSBoolean>('confirm'.toJS, 'Are you having fun?'.toJS)
+      .toDart;
   print('user said: \$answer');
 }
 
 void askName() {
-  final name = jsEval('prompt(a[0], a[1])', ['Your name?', 'stranger']);
-  if (name.isEmpty) {
+  final result = _window.callMethod<JSAny?>(
+    'prompt'.toJS,
+    'Your name?'.toJS,
+    'stranger'.toJS,
+  );
+  // prompt() returns String? — null if cancelled.
+  if (result == null) {
     print('cancelled');
   } else {
-    print('hello, \$name!');
+    print('hello, \${(result as JSString).toDart}!');
   }
 }
 
@@ -316,53 +332,76 @@ void askName() {
 // ============================================================
 
 void changePageTitle() {
-  jsEval('document.title = "DartVM says: " + a[0]', ['hi from Dart!']);
+  _document.setProperty('title'.toJS, 'DartVM says: hi from Dart!'.toJS);
   print('look at the browser tab title');
 }
 
 void floatingBanner() {
-  // Inject a sticky banner in the top-right corner of the actual page.
-  // Click invoke again to add more. Click clearBanners() to remove.
-  jsEval(r'''
-    const div = document.createElement('div');
-    div.className = 'dart-injected';
-    div.textContent = a[0];
-    div.style.cssText = [
-      'position:fixed', 'top:' + (10 + 38 * document.querySelectorAll('.dart-injected').length) + 'px',
-      'right:10px', 'z-index:99999',
-      'background:#0175C2', 'color:white',
-      'padding:8px 14px', 'border-radius:6px',
-      'font:13px/1.4 "Google Sans",system-ui,sans-serif',
-      'box-shadow:0 2px 10px rgba(0,0,0,0.3)',
-      'animation:dartin 200ms ease-out'
-    ].join(';');
-    if (!document.getElementById('dart-keyframes')) {
-      const s = document.createElement('style');
-      s.id = 'dart-keyframes';
-      s.textContent = '@keyframes dartin{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}';
-      document.head.appendChild(s);
-    }
-    document.body.appendChild(div);
-  ''', ['Hello from Dart — banner #' '\${DateTime.now().millisecondsSinceEpoch ~/ 1000}']);
+  // Inject a sticky banner in the top-right corner. Each invoke stacks.
+  final body = _document.getProperty<JSObject>('body'.toJS);
+  final head = _document.getProperty<JSObject>('head'.toJS);
+
+  // Inject the keyframes the first time we run.
+  final keyframes = _document.callMethod<JSAny?>(
+      'getElementById'.toJS, 'dart-keyframes'.toJS);
+  if (keyframes == null) {
+    final styleEl =
+        _document.callMethod<JSObject>('createElement'.toJS, 'style'.toJS);
+    styleEl.setProperty('id'.toJS, 'dart-keyframes'.toJS);
+    styleEl.setProperty(
+      'textContent'.toJS,
+      '@keyframes dartin{from{opacity:0;transform:translateX(20px)}'
+              'to{opacity:1;transform:translateX(0)}}'
+          .toJS,
+    );
+    head.callMethod<JSAny?>('appendChild'.toJS, styleEl);
+  }
+
+  final existing = _document.callMethod<JSObject>(
+      'querySelectorAll'.toJS, '.dart-injected'.toJS);
+  final stackIndex = existing.getProperty<JSNumber>('length'.toJS).toDartInt;
+
+  final div =
+      _document.callMethod<JSObject>('createElement'.toJS, 'div'.toJS);
+  div.setProperty('className'.toJS, 'dart-injected'.toJS);
+  div.setProperty(
+    'textContent'.toJS,
+    'Hello from Dart — banner #'
+            '\${DateTime.now().millisecondsSinceEpoch ~/ 1000}'
+        .toJS,
+  );
+  final style = div.getProperty<JSObject>('style'.toJS);
+  style.setProperty(
+    'cssText'.toJS,
+    ('position:fixed;top:\${10 + 38 * stackIndex}px;right:10px;z-index:99999;'
+            'background:#0175C2;color:white;'
+            'padding:8px 14px;border-radius:6px;'
+            'font:13px/1.4 "Google Sans",system-ui,sans-serif;'
+            'box-shadow:0 2px 10px rgba(0,0,0,0.3);'
+            'animation:dartin 200ms ease-out')
+        .toJS,
+  );
+  body.callMethod<JSAny?>('appendChild'.toJS, div);
   print('banner added (look top-right)');
 }
 
 void clearBanners() {
-  final n = jsEval(r'''
-    const els = document.querySelectorAll('.dart-injected');
-    els.forEach(e => e.remove());
-    els.length
-  ''');
+  final els = _document.callMethod<JSObject>(
+      'querySelectorAll'.toJS, '.dart-injected'.toJS);
+  final n = els.getProperty<JSNumber>('length'.toJS).toDartInt;
+  for (var i = 0; i < n; i++) {
+    final el = els.callMethod<JSObject>('item'.toJS, i.toJS);
+    el.callMethod<JSAny?>('remove'.toJS);
+  }
   print('removed \$n banners');
 }
 
 void changeBackgroundColor() {
   // Random tint of the editor pane.
   final hue = DateTime.now().millisecondsSinceEpoch % 360;
-  jsEval(
-    'document.body.style.background = "hsl(" + a[0] + " 30% 12%)"',
-    [hue],
-  );
+  final body = _document.getProperty<JSObject>('body'.toJS);
+  final style = body.getProperty<JSObject>('style'.toJS);
+  style.setProperty('background'.toJS, 'hsl(\$hue 30% 12%)'.toJS);
   print('body bg set to hsl(\$hue, 30%, 12%)');
 }
 
@@ -371,16 +410,25 @@ void changeBackgroundColor() {
 // ============================================================
 
 void userAgent() {
-  print('userAgent: \${jsEval('navigator.userAgent')}');
+  final ua = _navigator.getProperty<JSString>('userAgent'.toJS).toDart;
+  print('userAgent: \$ua');
 }
 
 void windowSize() {
-  print('window: \${jsEval('window.innerWidth + "x" + window.innerHeight')}');
+  final w = _window.getProperty<JSNumber>('innerWidth'.toJS).toDartInt;
+  final h = _window.getProperty<JSNumber>('innerHeight'.toJS).toDartInt;
+  print('window: \${w}x\$h');
 }
 
 void browserLanguage() {
-  // navigator.languages is an Array — comes back as JSON.
-  print('languages: \${jsEval('navigator.languages')}');
+  // navigator.languages is a JS Array — read it positionally.
+  final langs = _navigator.getProperty<JSObject>('languages'.toJS);
+  final n = langs.getProperty<JSNumber>('length'.toJS).toDartInt;
+  final out = <String>[
+    for (var i = 0; i < n; i++)
+      (langs.getProperty<JSString>(i.toString().toJS)).toDart,
+  ];
+  print('languages: \$out');
 }
 
 // ============================================================
@@ -388,26 +436,33 @@ void browserLanguage() {
 // ============================================================
 
 void mathOnJsSide() {
-  final sum = jsEval('a[0] + a[1] + a[2]', [10, 20, 30]);
-  final hyp = jsEval('Math.hypot(a[0], a[1])', [3, 4]);
-  print('JS sum 10+20+30 = \$sum');
+  final sum = (10 + 20 + 30); // trivial, just to show the round-trip below
+  final hyp = _Math
+      .callMethod<JSNumber>('hypot'.toJS, 3.toJS, 4.toJS)
+      .toDartDouble;
+  print('Dart sum 10+20+30 = \$sum');
   print('JS Math.hypot(3,4) = \$hyp');
 }
 
 void formatNumberWithIntl() {
-  // Use the real Intl API to format a Dart number.
-  final formatted = jsEval(
-    'new Intl.NumberFormat(a[1], { style:"currency", currency:a[2] }).format(a[0])',
-    [1234567.89, 'de-DE', 'EUR'],
-  );
+  // Use the real Intl.NumberFormat API.
+  final options = JSObject();
+  options.setProperty('style'.toJS, 'currency'.toJS);
+  options.setProperty('currency'.toJS, 'EUR'.toJS);
+
+  final ctor = _Intl.getProperty<JSFunction>('NumberFormat'.toJS);
+  final fmt = ctor.callAsConstructor<JSObject>('de-DE'.toJS, options);
+
+  final formatted =
+      fmt.callMethod<JSString>('format'.toJS, 1234567.89.toJS).toDart;
   print(formatted);
 }
 
 void isoTimestamp() {
-  final iso = jsEval(
-    'new Date(a[0]).toISOString()',
-    [DateTime.now().millisecondsSinceEpoch],
-  );
+  final Date = _window.getProperty<JSFunction>('Date'.toJS);
+  final ms = DateTime.now().millisecondsSinceEpoch;
+  final d = Date.callAsConstructor<JSObject>(ms.toJS);
+  final iso = d.callMethod<JSString>('toISOString'.toJS).toDart;
   print('ISO from JS: \$iso');
 }
 
@@ -416,11 +471,20 @@ void isoTimestamp() {
 // ============================================================
 
 void writeToLocalStorage() {
-  jsEval(
-    'localStorage.setItem(a[0], JSON.stringify(a[1]))',
-    ['dartvm:demo', {'msg': 'hi', 'when': DateTime.now().toIso8601String()}],
-  );
-  final back = jsEval('localStorage.getItem(a[0])', ['dartvm:demo']);
+  final payload = JSObject();
+  payload.setProperty('msg'.toJS, 'hi'.toJS);
+  payload.setProperty(
+      'when'.toJS, DateTime.now().toIso8601String().toJS);
+
+  final JSON = _window.getProperty<JSObject>('JSON'.toJS);
+  final encoded = JSON.callMethod<JSString>('stringify'.toJS, payload).toDart;
+
+  _localStorage.callMethod<JSAny?>(
+      'setItem'.toJS, 'dartvm:demo'.toJS, encoded.toJS);
+
+  final back = _localStorage
+      .callMethod<JSString>('getItem'.toJS, 'dartvm:demo'.toJS)
+      .toDart;
   print('round-tripped: \$back');
 }
 
@@ -429,17 +493,34 @@ void writeToLocalStorage() {
 // ============================================================
 
 void sortInJsCollation() {
-  // Sort a Dart-built list using JS's locale-aware comparator.
+  // Build a JS array from a Dart list, then call sort() with a locale-aware
+  // comparator from Intl.Collator.
   final words = ['Zürich', 'apple', 'Äpfel', 'banana', 'Österreich'];
-  final out = jsEval(
-    'a[0].slice().sort(new Intl.Collator("de-DE", { sensitivity:"base" }).compare)',
-    [words],
-  );
+  final Array = _window.getProperty<JSFunction>('Array'.toJS);
+  final arr = Array.callAsConstructor<JSObject>();
+  for (final w in words) {
+    arr.callMethod<JSAny?>('push'.toJS, w.toJS);
+  }
+
+  final opts = JSObject();
+  opts.setProperty('sensitivity'.toJS, 'base'.toJS);
+  final CollatorCtor = _Intl.getProperty<JSFunction>('Collator'.toJS);
+  final collator =
+      CollatorCtor.callAsConstructor<JSObject>('de-DE'.toJS, opts);
+  final cmp = collator.getProperty<JSFunction>('compare'.toJS);
+
+  arr.callMethod<JSAny?>('sort'.toJS, cmp);
+
+  final n = arr.getProperty<JSNumber>('length'.toJS).toDartInt;
+  final out = <String>[
+    for (var i = 0; i < n; i++)
+      arr.getProperty<JSString>(i.toString().toJS).toDart,
+  ];
   print('sorted: \$out');
 }
 
 void main() {
-  print('JS interop ready. Try ▶ Invoke showAlert() first.');
+  print('JS interop ready (dart:js_interop). Try ▶ Invoke showAlert() first.');
 }
 `,
   // Canvas drawing into the Sketch pane via jsEval. Each example is a single
@@ -447,51 +528,99 @@ void main() {
   // C++↔JS round-trip per Invoke click, so the actual draws happen at native
   // speed. The pane on the right is a plain <canvas id="sketch"> element;
   // anything you can do with the 2D context in JS works here.
-  canvas: `import 'dart:convert';
+  canvas: `// Canvas drawing in two flavors:
+//
+//  * Simple scenes (\`clear\`, \`colorWheel\`, \`plotSineFromDart\`,
+//    \`startAnimation\`) use the standard \`dart:js_interop\` /
+//    \`dart:js_interop_unsafe\` libraries, the same API \`package:web\`
+//    exposes. Each property access and method call lowers to one embedder
+//    interop call.
+//
+//  * Compute-heavy scenes (\`mandelbrot\`, \`zoomedMandelbrot\`,
+//    \`spirograph\`) ship one self-contained JS snippet via \`jsEval\` —
+//    Dart hands over parameters, JS does the inner loop. That avoids
+//    paying for ~1 M interop crossings per frame.
+//
+// Both routes drive the same real <canvas id="sketch"> element in the
+// Sketch pane on the right.
 
+import 'dart:convert';
+import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
+
+// === jsEval: bulk-throughput helper used for compute-heavy scenes ===
+//
+// Single embedder native that takes a JS snippet plus a JSON-encoded args
+// array. Useful when a scene needs thousands of pixel writes or vector
+// points; one interop call ships the whole snippet to JS where the inner
+// loop runs at native JS speed.
 @pragma("vm:external-name", "EmbedderJSEval")
 external String _jsEvalRaw(String code, String argsJson);
 
 String jsEval(String code, [List<Object?> args = const []]) =>
     _jsEvalRaw(code, jsonEncode(args));
 
-// Each invoke is a self-contained "scene" drawn into the canvas in a single
-// eval. The Sketch pane on the right shows the result.
+JSObject get _document =>
+    globalContext.getProperty<JSObject>('document'.toJS);
+JSObject get _window => globalContext;
+
+JSObject _canvas() =>
+    _document.callMethod<JSObject>('getElementById'.toJS, 'sketch'.toJS);
+JSObject _ctx(JSObject c) =>
+    c.callMethod<JSObject>('getContext'.toJS, '2d'.toJS);
+
+int _w(JSObject c) => c.getProperty<JSNumber>('width'.toJS).toDartInt;
+int _h(JSObject c) => c.getProperty<JSNumber>('height'.toJS).toDartInt;
+
+void _fillRect(JSObject ctx, num x, num y, num w, num h, String color) {
+  ctx.setProperty('fillStyle'.toJS, color.toJS);
+  ctx.callMethod<JSAny?>(
+      'fillRect'.toJS, x.toJS, y.toJS, w.toJS, h.toJS);
+}
 
 void clear() {
-  jsEval(r'''
-    const c = document.getElementById('sketch');
-    const ctx = c.getContext('2d');
-    ctx.clearRect(0, 0, c.width, c.height);
-    ctx.fillStyle = 'white';
-    ctx.fillRect(0, 0, c.width, c.height);
-  ''');
+  final c = _canvas();
+  final ctx = _ctx(c);
+  final W = _w(c), H = _h(c);
+  ctx.callMethod<JSAny?>(
+      'clearRect'.toJS, 0.toJS, 0.toJS, W.toJS, H.toJS);
+  _fillRect(ctx, 0, 0, W, H, 'white');
   print('cleared');
 }
 
 void colorWheel() {
-  jsEval(r'''
-    const c = document.getElementById('sketch'), W = c.width, H = c.height;
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, W, H);
-    const cx = W/2, cy = H/2, R = Math.min(W, H) * 0.42;
-    for (let i = 0; i < 360; i++) {
-      const r = i * Math.PI / 180;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.arc(cx, cy, R, r - 0.01, r + 0.012);
-      ctx.closePath();
-      ctx.fillStyle = 'hsl(' + i + ', 75%, 55%)';
-      ctx.fill();
-    }
-    ctx.fillStyle = '#0d1117';
-    ctx.beginPath(); ctx.arc(cx, cy, R*0.4, 0, Math.PI*2); ctx.fill();
-  ''');
+  final c = _canvas();
+  final ctx = _ctx(c);
+  final W = _w(c), H = _h(c);
+  _fillRect(ctx, 0, 0, W, H, '#0d1117');
+  final cx = W / 2, cy = H / 2;
+  final R = math.min(W, H) * 0.42;
+  for (var i = 0; i < 360; i++) {
+    final r = i * math.pi / 180;
+    ctx.callMethod<JSAny?>('beginPath'.toJS);
+    ctx.callMethod<JSAny?>('moveTo'.toJS, cx.toJS, cy.toJS);
+    ctx.callMethodVarArgs<JSAny?>('arc'.toJS, <JSAny?>[
+      cx.toJS, cy.toJS, R.toJS, (r - 0.01).toJS, (r + 0.012).toJS,
+    ]);
+    ctx.callMethod<JSAny?>('closePath'.toJS);
+    ctx.setProperty('fillStyle'.toJS, 'hsl(\$i, 75%, 55%)'.toJS);
+    ctx.callMethod<JSAny?>('fill'.toJS);
+  }
+  ctx.setProperty('fillStyle'.toJS, '#0d1117'.toJS);
+  ctx.callMethod<JSAny?>('beginPath'.toJS);
+  ctx.callMethodVarArgs<JSAny?>('arc'.toJS, <JSAny?>[
+    cx.toJS, cy.toJS, (R * 0.4).toJS, 0.toJS, (math.pi * 2).toJS,
+  ]);
+  ctx.callMethod<JSAny?>('fill'.toJS);
   print('color wheel drawn');
 }
 
 void mandelbrot() {
-  // Real Mandelbrot, computed in JS for speed but parameterized from Dart.
+  // Per-pixel ImageData. One jsEval ships the whole renderer; the inner
+  // loop runs at JS speed. Parameters come from Dart.
   jsEval(r'''
     const c = document.getElementById('sketch'), W = c.width, H = c.height;
     const ctx = c.getContext('2d');
@@ -525,7 +654,7 @@ void mandelbrot() {
 }
 
 void zoomedMandelbrot() {
-  // Same renderer, different params — deep into the seahorse valley.
+  // Same approach, deeper into the seahorse valley + more iterations.
   jsEval(r'''
     const c = document.getElementById('sketch'), W = c.width, H = c.height;
     const ctx = c.getContext('2d');
@@ -550,8 +679,18 @@ void zoomedMandelbrot() {
   print('zoomed-in mandelbrot');
 }
 
+// (A typed-data-bulk version of mandelbrot is possible via
+// \`Uint8ClampedList.toJS\` shipping the whole RGBA buffer in one
+// interop call. The infrastructure is in place — see the typed-data
+// round-trip examples in the Dart-Live SDK tests — but combining a
+// pixel-fill loop with an immediate \`.toJS\` on the same function frame
+// currently trips a VM optimizer quirk in the wasm-JIT build. The
+// \`jsEval\`-based mandelbrot above is the recommended path until that's
+// fixed.)
+
 void spirograph() {
-  // Hypotrochoid drawn with vector lines.
+  // Hypotrochoid: thousands of lineTo() calls. One jsEval ships the curve
+  // params; the loop runs in JS.
   jsEval(r'''
     const c = document.getElementById('sketch'), W = c.width, H = c.height;
     const ctx = c.getContext('2d');
@@ -575,13 +714,19 @@ void spirograph() {
 }
 
 void plotSineFromDart() {
-  // Compute the samples in Dart, ship as a single array to JS for plotting.
+  // Compute the samples in Dart, ship as one array to JS for plotting in a
+  // single jsEval. Demonstrates Dart-computed data feeding a JS renderer.
   final n = 400;
   final ys = List<double>.generate(
-    n, (i) => 0.5 + 0.4 * (i / n) * (0.5 + 0.5 *
-        (i.isEven ? 1 : -1) * (i % 7 == 0 ? -1 : 1) *
-        // a synthetic but interesting curve
-        ((i % 23) / 23)));
+      n,
+      (i) => 0.5 +
+          0.4 *
+              (i / n) *
+              (0.5 +
+                  0.5 *
+                      (i.isEven ? 1 : -1) *
+                      (i % 7 == 0 ? -1 : 1) *
+                      ((i % 23) / 23)));
   jsEval(r'''
     const c = document.getElementById('sketch'), W = c.width, H = c.height;
     const ctx = c.getContext('2d');
@@ -600,8 +745,9 @@ void plotSineFromDart() {
 }
 
 void startAnimation() {
-  // The animation loop runs in JS so we don't pay per-frame interop. Dart
-  // kicks it off with one eval; stopAnimation() clears the handle.
+  // The per-frame loop runs entirely in JS via setInterval, so animation
+  // costs zero interop after the initial install. stopAnimation() tears it
+  // down via dart:js_interop below.
   jsEval(r'''
     if (window.__dartSketchAnim) clearInterval(window.__dartSketchAnim);
     const c = document.getElementById('sketch'), W = c.width, H = c.height;
@@ -629,17 +775,18 @@ void startAnimation() {
 }
 
 void stopAnimation() {
-  jsEval(r'''
-    if (window.__dartSketchAnim) {
-      clearInterval(window.__dartSketchAnim);
-      window.__dartSketchAnim = null;
-    }
-  ''');
+  // Pure dart:js_interop teardown: read the handle off window and clear it.
+  if (_window.hasProperty('__dartSketchAnim'.toJS).toDart) {
+    final h =
+        _window.getProperty<JSNumber>('__dartSketchAnim'.toJS).toDartInt;
+    _window.callMethod<JSAny?>('clearInterval'.toJS, h.toJS);
+    _window.delete('__dartSketchAnim'.toJS);
+  }
   print('animation stopped');
 }
 
 void main() {
-  print('Canvas demo ready. Invoke any drawing function above.');
+  print('Canvas demo ready (dart:js_interop). Invoke any drawing function.');
   print('(If the Sketch pane is closed, click the Sketch button in the toolbar.)');
 }
 `,
@@ -1114,6 +1261,22 @@ status.innerHTML = '<span class="info">loading platform…</span>';
 const platformBytes = new Uint8Array(
   await (await fetch('vm_platform.dill?v=' + Date.now(), { cache: 'no-store' })).arrayBuffer());
 
+// Optional pre-compiled package kernels. Embedders declare them before this
+// script runs:
+//   window.dartLivePackages = [{ name: 'foo', dillUrl: './foo.dill' }]
+// Each .dill is produced by:
+//   dart compile kernel --platform=vm_platform.dill -o foo.dill lib/foo.dart
+// Only the CFE/VM side resolves these; the analyzer consumes a different
+// summary format and will still flag `package:` imports as unresolved.
+const packageDills = [];
+const pkgConfigs = globalThis.dartLivePackages ?? [];
+if (pkgConfigs.length > 0) {
+  const bufs = await Promise.all(
+    pkgConfigs.map(p => fetch(p.dillUrl).then(r => r.arrayBuffer()))
+  );
+  for (const b of bufs) packageDills.push(new Uint8Array(b));
+}
+
 // Analyzer (separate dart2wasm module). Failure is non-fatal — Run/Reload
 // don't depend on it.
 status.innerHTML = '<span class="info">loading analyzer…</span>';
@@ -1225,7 +1388,7 @@ const extractSync = VM.cwrap('dart_il_extract', 'number', ['number', 'number', '
 
 async function compile(source) {
   const t0 = performance.now();
-  const k = new Uint8Array(await globalThis.dartCompile(source, platformBytes));
+  const k = new Uint8Array(await globalThis.dartCompile(source, platformBytes, packageDills));
   for (let i = 8; i < 18; i++) k[i] = 0x30;
   return { kernel: k, ms: (performance.now() - t0).toFixed(0) };
 }
