@@ -204,7 +204,13 @@ them before the dart-live script loads:
 - `summaryUrl` is optional. Without it the package imports compile and
   run, but the analyzer pane red-underlines them. Build it by calling
   `AnalysisDriver.buildPackageBundle(uriList: [...])` from
-  `package:analyzer/src/dart/analysis/driver.dart`.
+  `package:analyzer/src/dart/analysis/driver.dart`. **`uriList` must
+  contain every library the package ships, not just the public
+  `lib/*.dart` files — recurse into `lib/src/` too.** Linked elements
+  cross-reference internal libraries, so a partial bundle throws
+  `Missing library: ...` at link time (which surfaces in
+  `dart_analyzer.wasm` as `Maximum call stack size exceeded` — same
+  exception, just observed through dart2wasm's throw trampoline).
 
 **Analyzer version pin.** The PackageBundle binary format breaks across
 analyzer major versions. `dart_analyzer.wasm` is built against the
