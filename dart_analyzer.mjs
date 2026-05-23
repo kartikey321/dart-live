@@ -216,7 +216,7 @@ class CompiledApp {
         }
         return null;
       },
-      b: (module,f) => finalizeWrapper(f, function(x0) { return module.exports._JS_Trampoline_FunctionToJSExportedDartFunction_get_toJS_12(f,arguments.length,x0) }),
+      b: (module,f) => finalizeWrapper(f, function(x0,x1,x2) { return module.exports._JS_Trampoline_FunctionToJSExportedDartFunction_get_toJS_12(f,arguments.length,x0,x1,x2) }),
       bB: x0 => { globalThis.dartAnalyzerInit = x0 },
       c: (module,f) => finalizeWrapper(f, function(x0) { return module.exports._JS_Trampoline_FunctionToJSExportedDartFunction_get_toJS_13(f,arguments.length,x0) }),
       cB: (s) => +s,

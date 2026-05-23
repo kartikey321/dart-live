@@ -1261,21 +1261,32 @@ status.innerHTML = '<span class="info">loading platform…</span>';
 const platformBytes = new Uint8Array(
   await (await fetch('vm_platform.dill?v=' + Date.now(), { cache: 'no-store' })).arrayBuffer());
 
-// Optional pre-compiled package kernels. Embedders declare them before this
+// Optional pre-compiled package artifacts. Embedders declare them before this
 // script runs:
-//   window.dartLivePackages = [{ name: 'foo', dillUrl: './foo.dill' }]
-// Each .dill is produced by:
-//   dart compile kernel --platform=vm_platform.dill -o foo.dill lib/foo.dart
-// Only the CFE/VM side resolves these; the analyzer consumes a different
-// summary format and will still flag `package:` imports as unresolved.
+//   window.dartLivePackages = [
+//     { name: 'foo', dillUrl: './foo.dill', summaryUrl: './foo.sum' }
+//   ]
+// dillUrl is the kernel file (run-time, produced by `dart compile kernel`).
+// summaryUrl is the analyzer bundle (editor squiggles); omit it if you don't
+// need analyzer support for that package.
 const packageDills = [];
+const packageNames = [];
+const packageSummaries = [];
 const pkgConfigs = globalThis.dartLivePackages ?? [];
 if (pkgConfigs.length > 0) {
   status.innerHTML = '<span class="info">loading packages…</span>';
-  const bufs = await Promise.all(
+  const dillBufs = await Promise.all(
     pkgConfigs.map(p => fetch(p.dillUrl).then(r => r.arrayBuffer()))
   );
-  for (const b of bufs) packageDills.push(new Uint8Array(b));
+  for (const b of dillBufs) packageDills.push(new Uint8Array(b));
+  const withSum = pkgConfigs.filter(p => p.summaryUrl);
+  const sumBufs = await Promise.all(
+    withSum.map(p => fetch(p.summaryUrl).then(r => r.arrayBuffer()))
+  );
+  for (let i = 0; i < withSum.length; i++) {
+    packageNames.push(withSum[i].name);
+    packageSummaries.push(new Uint8Array(sumBufs[i]));
+  }
 }
 
 // Analyzer (separate dart2wasm module). Failure is non-fatal — Run/Reload
@@ -1290,7 +1301,7 @@ status.innerHTML = '<span class="info">loading analyzer…</span>';
     ]);
     const inst = await (await m.compileStreaming(analyzerWasm)).instantiate({});
     inst.invokeMain([]);
-    globalThis.dartAnalyzerInit(new Uint8Array(sdkBuf));
+    globalThis.dartAnalyzerInit(new Uint8Array(sdkBuf), packageNames, packageSummaries);
     runAnalysis();
   } catch (e) {
     $('diagCounts').innerHTML = '<span class="err">analyzer failed: ' +
