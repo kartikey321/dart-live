@@ -219,6 +219,11 @@ in-tree `pkg/analyzer` at **`13.1.0-dev`**, so pin your
 (`^8`, `^12`, etc.) will throw `Null check operator used on a null
 value` inside `PackageBundleReader` on a format mismatch.
 
+**Live example.** https://playground.knex.mahawarkartikey.in embeds
+dart-live with the `knex_dart` package preloaded this way, so you can
+write `import 'package:knex_dart/knex_dart.dart';` and have it resolve,
+compile, run, and type-check in the browser.
+
 ## License
 
 This repository contains a built artifact bundle. Build inputs and patches
