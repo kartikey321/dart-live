@@ -51,12 +51,13 @@ class CompiledApp {
   //   loadDeferredModules should return a Promise that resolves when all the
   //   modules have been loaded and the callback promises have resolved.
   // `loadDeferredId` is a JS function that takes load ID produced by the
-  //   compiler when the `load-ids` option is passed. Each load ID maps to one
-  //   or more wasm files as specified in the emitted JSON file. It also takes a
-  //   callback that should be invoked for each loaded module with 2 arugments:
-  //   (1) the module name, (2) the loaded module in a format supported by
-  //   `WebAssembly.compile` or `WebAssembly.compileStreaming`. The callback
-  //   returns a Promise that resolves when the module is instantiated.
+  //   compiler when the `use-load-ids` option is passed. Each load ID maps to
+  //   one or more wasm files as specified in the emitted JSON file. It also
+  //   takes a callback that should be invoked for each loaded module with 2
+  //   arugments: (1) the module name, (2) the loaded module in a format
+  //   supported by `WebAssembly.compile` or `WebAssembly.compileStreaming`.
+  //   The callback returns a Promise that resolves when the module is
+  //   instantiated.
   //   loadDeferredModules should return a Promise that resolves when all the
   //   modules have been loaded and the callback promises have resolved.
   async instantiate(additionalImports, {loadDeferredModules, loadDeferredId} = {}) {
@@ -92,7 +93,7 @@ class CompiledApp {
     // Imports
     const dart2wasm = {
             AB: () => Date.now(),
-      AC: (map, o, v) => map.set(o, v),
+      AC: (map, o) => map.get(o),
       B: s => printToConsole(s),
       BB: () => 1000 * performance.now(),
       BC: () => new WeakMap(),
@@ -116,36 +117,32 @@ class CompiledApp {
       setTimeout(() => dartInstance.exports.$invokeCallback(c),ms),
       F: () => new Error().stack,
       FB: s => s.toUpperCase(),
-      FC: (o) => new DataView(o.buffer, o.byteOffset, o.byteLength),
+      FC: Function.prototype.call.bind(DataView.prototype.getUint8),
       G: s => JSON.stringify(s),
       GB: Object.is,
-      GC: Function.prototype.call.bind(Object.getOwnPropertyDescriptor(DataView.prototype, 'byteLength').get),
+      GC: o => o.byteOffset,
       H: Function.prototype.call.bind(Number.prototype.toString),
       HB: (string, token) => string.split(token),
-      HC: o => o.byteOffset,
+      HC: Function.prototype.call.bind(Object.getOwnPropertyDescriptor(DataView.prototype, 'byteLength').get),
       I: Function.prototype.call.bind(String.prototype.indexOf),
       IB: o => o instanceof Array,
-      IC: (o, offsetInBytes, lengthInBytes) => {
-        var dst = new ArrayBuffer(lengthInBytes);
-        new Uint8Array(dst).set(new Uint8Array(o, offsetInBytes, lengthInBytes));
-        return new DataView(dst);
-      },
+      IC: Function.prototype.call.bind(DataView.prototype.setUint8),
       J: o => o,
       JB: (a, i) => a[i],
-      JC: Function.prototype.call.bind(DataView.prototype.getUint8),
+      JC: o => o.buffer,
       K: o => {
         if (o === undefined || o === null) return 0;
         if (typeof o === 'number') return 1;
         return 2;
       },
       KB: (a, i) => a.push(i),
-      KC: Function.prototype.call.bind(DataView.prototype.setUint8),
+      KC: (b, o) => new DataView(b, o),
       L: x0 => x0.index,
       LB: a => a.length,
-      LC: o => o.buffer,
+      LC: (b, o, l) => new DataView(b, o, l),
       M: o => String(o),
       MB: (a, i, v) => a[i] = v,
-      MC: (b, o) => new DataView(b, o),
+      MC: Function.prototype.call.bind(DataView.prototype.getInt32),
       N: o => o === undefined,
       NB: (jsArray, jsArrayOffset, wasmArray, wasmArrayOffset, length) => {
         const setValue = dartInstance.exports.$wasmI8ArraySet;
@@ -153,16 +150,16 @@ class CompiledApp {
           setValue(wasmArray, wasmArrayOffset + i, jsArray[jsArrayOffset + i]);
         }
       },
-      NC: (b, o, l) => new DataView(b, o, l),
+      NC: Function.prototype.call.bind(DataView.prototype.getUint16),
       O: (x0,x1) => x0.exec(x1),
       OB: (o, start, length) => new Uint8Array(o.buffer, o.byteOffset + start, length),
-      OC: Function.prototype.call.bind(DataView.prototype.getInt32),
+      OC: Function.prototype.call.bind(DataView.prototype.setUint32),
       P: (x0,x1) => { x0.lastIndex = x1 },
       PB: (x0,x1) => x0.test(x1),
-      PC: Function.prototype.call.bind(DataView.prototype.getUint16),
+      PC: Function.prototype.call.bind(DataView.prototype.getUint32),
       Q: o => o,
       QB: x0 => x0.pop(),
-      QC: Function.prototype.call.bind(DataView.prototype.getUint32),
+      QC: o => o.byteLength,
       R: (s, m) => {
         try {
           return new RegExp(s, m);
@@ -171,10 +168,14 @@ class CompiledApp {
         }
       },
       RB: x0 => x0.flags,
-      RC: Function.prototype.call.bind(DataView.prototype.setUint32),
+      RC: (o, offsetInBytes, lengthInBytes) => {
+        var dst = new ArrayBuffer(lengthInBytes);
+        new Uint8Array(dst).set(new Uint8Array(o, offsetInBytes, lengthInBytes));
+        return new DataView(dst);
+      },
       S: o => o instanceof RegExp,
       SB: Function.prototype.call.bind(String.prototype.toLowerCase),
-      SC: o => o.byteLength,
+      SC: (o) => new DataView(o.buffer, o.byteOffset, o.byteLength),
       T: (string, times) => string.repeat(times),
       TB: (x0,x1) => x0[x1],
       TC: o => {
@@ -216,7 +217,7 @@ class CompiledApp {
         }
         return null;
       },
-      b: (module,f) => finalizeWrapper(f, function(x0,x1,x2) { return module.exports._JS_Trampoline_FunctionToJSExportedDartFunction_get_toJS_12(f,arguments.length,x0,x1,x2) }),
+      b: (module,f) => finalizeWrapper(f, function(x0,x1) { return module.exports._JS_Trampoline_FunctionToJSExportedDartFunction_get_toJS_12(f,arguments.length,x0,x1) }),
       bB: x0 => { globalThis.dartAnalyzerInit = x0 },
       c: (module,f) => finalizeWrapper(f, function(x0) { return module.exports._JS_Trampoline_FunctionToJSExportedDartFunction_get_toJS_13(f,arguments.length,x0) }),
       cB: (s) => +s,
@@ -279,7 +280,7 @@ class CompiledApp {
       y: (s, p, i) => s.lastIndexOf(p, i),
       yB: (a, l) => a.length = l,
       z: () => typeof dartUseDateNowForTicks !== "undefined",
-      zB: (map, o) => map.get(o),
+      zB: (map, o, v) => map.set(o, v),
 
     };
 

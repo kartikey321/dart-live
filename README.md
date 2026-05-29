@@ -187,41 +187,120 @@ Total: about 26 MB uncompressed, 7.6 MB gzipped.
 
 ## External packages
 
-Embedders can ship pre-compiled packages alongside the bundle by declaring
-them before the dart-live script loads:
+Embedders ship two kinds of artifacts for external packages:
+
+- **Kernel dills** (one per top-level package), used by the VM at run time
+  for `import 'package:foo/...'` to actually execute.
+- **A single source bundle** (one DPKG blob covering every package and
+  its transitive deps), used by the analyzer for live diagnostics + the
+  upcoming completion / hover / goto-definition surface.
+
+Declare them on `window` before the dart-live script tag loads:
 
 ```html
 <script>
   window.dartLivePackages = [
-    { name: 'foo', dillUrl: './foo.dill', summaryUrl: './foo.sum' },
+    { name: 'knex_dart', dillUrl: './knex_dart.dill' },
   ];
+  window.dartLivePackagesBundle = './dart_packages.bin';
 </script>
 ```
 
-- `dillUrl` is required. Produce it on the host with
-  `dart compile kernel --platform=vm_platform.dill -o foo.dill lib/foo.dart`.
-  Resolves `package:foo/...` for the CFE and runs in the VM.
-- `summaryUrl` is optional. Without it the package imports compile and
-  run, but the analyzer pane red-underlines them. Build it by calling
-  `AnalysisDriver.buildPackageBundle(uriList: [...])` from
-  `package:analyzer/src/dart/analysis/driver.dart`. **`uriList` must
-  contain every library the package ships, not just the public
-  `lib/*.dart` files — recurse into `lib/src/` too.** Linked elements
-  cross-reference internal libraries, so a partial bundle throws
-  `Missing library: ...` at link time (which surfaces in
-  `dart_analyzer.wasm` as `Maximum call stack size exceeded` — same
-  exception, just observed through dart2wasm's throw trampoline).
+Either field is optional. With no `dartLivePackages`, `import 'package:...'`
+won't execute. With no `dartLivePackagesBundle`, the analyzer will red-
+underline external imports but everything else still works.
 
-**Analyzer version pin.** The PackageBundle binary format breaks across
-analyzer major versions. `dart_analyzer.wasm` is built against the
-in-tree `pkg/analyzer` at **`13.1.0-dev`**, so pin your
-`build_summary.dart` to `analyzer: ^13.0.0` from pub. Older majors
-(`^8`, `^12`, etc.) will throw `Null check operator used on a null
-value` inside `PackageBundleReader` on a format mismatch.
+### Build a `dartLivePackagesBundle` from pub.dev
 
-**Live example.** https://playground.knex.mahawarkartikey.in embeds
-dart-live with the `knex_dart` package preloaded this way, so you can
-write `import 'package:knex_dart/knex_dart.dart';` and have it resolve,
+The packer is a single node script in this repo:
+[`tools/pack_pub_packages.mjs`](tools/pack_pub_packages.mjs). It walks
+the transitive dependency graph from pub.dev's HTTP API, downloads each
+tarball, extracts it in memory, and emits the DPKG blob in one shot:
+
+```sh
+node tools/pack_pub_packages.mjs dart_packages.bin knex_dart
+```
+
+You can list multiple seeds. For `knex_dart 1.2.0` the closure is 7
+packages (`knex_dart`, `logging`, `meta`, `collection`,
+`knex_dart_capabilities`, `universal_io`, `typed_data`) at ~1.4 MB.
+
+Version selection: latest stable satisfying the parent's `^x.y.z`
+constraint, first-resolved wins (no diamond reconciliation). Good
+enough for embedded playgrounds; for fully reproducible solves port
+`package:pub_semver` + a real solver.
+
+### Build a kernel dill on the host
+
+For each top-level package you want to execute:
+
+```sh
+dart compile kernel \
+    --platform=vm_platform.dill \
+    -o knex_dart.dill \
+    lib/knex_dart.dart
+```
+
+Drop `vm_platform.dill` next to your build (or fetch it from this repo).
+The resulting dill resolves `package:knex_dart/knex_dart.dart` at runtime
+in the in-page VM.
+
+### Bundle format reference (DPKG)
+
+A single binary blob. Little-endian throughout:
+
+```
+bytes 0..3 : ascii "DPKG"
+u32        : nPackages
+for each package:
+  u32      : nameLen, then nameLen utf-8 bytes (package name)
+  u32      : nFiles
+  for each file:
+    u32    : pathLen, then pathLen utf-8 bytes (relative path)
+    u32    : contentLen, then contentLen file bytes
+```
+
+Files are mounted at `/ext_pkg_<i>/<relPath>` inside the wasm's
+`MemoryResourceProvider`. The analyzer builds a synthetic
+`package_config.json` listing every package, and a synthetic
+`user/pubspec.yaml` that declares every mounted package as a dependency
+of the user file (otherwise the analyzer's `_PubFilter` hides their
+symbols from unimported-libraries completion).
+
+### What happens when a dependency is missing
+
+Source-based loading degrades gracefully: a missing package surfaces as
+a localized "Target of URI doesn't exist" diagnostic on the offending
+`import` line, every identifier from that import becomes "Undefined
+name", and **the rest of the file analyzes normally**. Hover, completion,
+and goto-def on code that doesn't touch the missing import keep working.
+This is the same UX you get in a real IDE when you forget to `pub get`.
+
+Compare to the old summary-based path, which threw
+`ArgumentError: Missing library: ...` from
+`LinkedElementFactory._reportMissingLibrary` and collapsed the entire
+analysis request. That old path is gone -- `dart_analyzer.wasm` only
+accepts the DPKG bundle now.
+
+### Limitations
+
+- **Generated code.** Packages that rely on `build_runner` codegen
+  (`freezed`, `json_serializable`, `drift`, ...) only ship hand-written
+  source in their pub tarball; generated files are not in the bundle.
+  References to generated symbols flag as undefined.
+- **Bundle size.** Every `.dart` file in each package ships, plus
+  incidental files from the tarball (`README`, `CHANGELOG`, examples).
+  For a few-MB closure that's fine; for "all of pub.dev" you would
+  filter to `lib/**` in the packer.
+- **No private packages.** The packer only reads from pub.dev. For
+  local / git / forked packages, pack any directory tree into a DPKG
+  blob yourself -- the format is intentionally trivial.
+
+### Live example
+
+https://playground.knex.mahawarkartikey.in embeds dart-live with the
+`knex_dart` package preloaded both ways, so you can write
+`import 'package:knex_dart/knex_dart.dart';` and have it resolve,
 compile, run, and type-check in the browser.
 
 ## License
