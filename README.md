@@ -29,10 +29,12 @@ as you type.
   JS interop.
 - **Expert mode** exposes per-function IL views, including a Graphviz
   rendering of each compiler phase.
-- **Live Dart analyzer**, the same one `dart analyze` runs locally,
-  compiled to WebAssembly. It type-checks and inspects your code as
-  you type, before you ever press Run, and surfaces every diagnostic
-  (errors, warnings, hints, lints) as inline markers in Monaco.
+- **Live Dart analyzer (LSP)**, the full analysis server `dart analyze`
+  uses locally, compiled to WebAssembly and exposed to the page over a
+  JSON-RPC bridge. Live diagnostics (errors, warnings, hints, lints),
+  completion (including auto-import from unimported libraries), and
+  hover docs -- the same IDE experience you get in VS Code or IntelliJ,
+  running entirely in your browser with no language-server backend.
 
 ## Table of contents
 
@@ -168,8 +170,12 @@ Six starred samples open with the headline features:
 8. `Future.delayed` actually waits wall-clock time. `_embedderSleep`
    forwards to `emscripten_sleep` via Asyncify, so the JS event loop
    stays responsive.
-9. The analyzer runs in parallel against `dart_sdk.sum` and feeds Monaco
-   via `setModelMarkers`.
+9. The LSP server (`dart_lsp.wasm`) runs in parallel against
+   `dart_sdk.sum` + an optional `dart_packages.bin` external-package
+   source bundle. It speaks LSP JSON-RPC over a JS bridge
+   (`globalThis.lspSend` / `lspReceive`); the page wires this to Monaco's
+   completion provider, hover provider, and `setModelMarkers` for
+   diagnostics.
 
 ## Bundle
 
@@ -179,11 +185,12 @@ The browser pulls these files; no server is involved:
 |---|---:|---|
 | `dart_il.wasm` | 9.7 MB | Dart VM (emcc, ARM simulator) |
 | `dart_cfe.wasm` | 2.4 MB | Common front-end (dart2wasm), Dart to kernel |
-| `dart_analyzer.wasm` | 2.5 MB | Dart analyzer (dart2wasm) |
+| `dart_lsp.wasm` | 4.4 MB | Dart analysis server (dart2wasm). Speaks LSP over a JS bridge: diagnostics, completion, hover, auto-import. |
 | `vm_platform.dill` | 8.3 MB | Platform kernel (dart:core, dart:async, ...) |
 | `dart_sdk.sum` | 3.2 MB | Analyzer SDK summary |
+| `dart_packages.bin` | 0.9 MB | Default external-packages source bundle (`meta`, `collection`, `async`). Optional, see below. |
 
-Total: about 26 MB uncompressed, 7.6 MB gzipped.
+Total: about 29 MB uncompressed, ~8 MB gzipped.
 
 ## External packages
 
@@ -207,8 +214,12 @@ Declare them on `window` before the dart-live script tag loads:
 ```
 
 Either field is optional. With no `dartLivePackages`, `import 'package:...'`
-won't execute. With no `dartLivePackagesBundle`, the analyzer will red-
-underline external imports but everything else still works.
+won't execute. With no `dartLivePackagesBundle`, the page tries to fetch
+`./dart_packages.bin` next to `index.html` -- this repo ships a default
+one covering `meta`, `collection`, and `async`, so those imports just
+work out of the box. If neither the override nor the default bundle is
+present, the analyzer will red-underline external imports but everything
+else still works.
 
 ### Build a `dartLivePackagesBundle` from pub.dev
 

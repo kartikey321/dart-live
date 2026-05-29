@@ -1231,6 +1231,15 @@ const editor = monaco.editor.create($('editor'), {
   scrollBeyondLastLine: false,
   automaticLayout: true,
   tabSize: 2,
+  quickSuggestions: { other: true, comments: false, strings: false },
+  quickSuggestionsDelay: 10,
+  suggestOnTriggerCharacters: true,
+  acceptSuggestionOnEnter: 'on',
+  // CRITICAL: without this, Monaco's built-in word-based completion provider
+  // merges with our LSP provider and drops items that don't also appear in
+  // the local word stream -- which is most of dart:math, dart:async, and
+  // every cross-package symbol.
+  wordBasedSuggestions: 'off',
 });
 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => doRun());
 
@@ -1281,61 +1290,78 @@ if (pkgConfigs.length > 0) {
   );
   for (const b of dillBufs) packageDills.push(new Uint8Array(b));
 }
-if (typeof globalThis.dartLivePackagesBundle === 'string') {
-  try {
-    const r = await fetch(globalThis.dartLivePackagesBundle);
-    if (r.ok) packagesBundle = new Uint8Array(await r.arrayBuffer());
-  } catch (_) { /* missing bundle is non-fatal */ }
+// Default bundle URL is `./dart_packages.bin`; embedders override with
+// `window.dartLivePackagesBundle = './their_bundle.bin'`.
+const bundleUrl = globalThis.dartLivePackagesBundle ?? './dart_packages.bin';
+try {
+  const r = await fetch(bundleUrl);
+  if (r.ok) packagesBundle = new Uint8Array(await r.arrayBuffer());
+} catch (_) { /* missing bundle is non-fatal */ }
+
+// LSP server (separate dart2wasm module). Provides diagnostics, completion,
+// and hover. Failure is non-fatal -- Run/Reload don't depend on it.
+status.innerHTML = '<span class="info">loading analyzer…</span>';
+
+const LSP_OWNER = 'dart-lsp';
+const LSP_FILE_URI = 'file:///user/lib/main.dart';
+let lspReady = false;
+let lspDocVersion = 1;
+let lspRequestId = 1;
+const lspPending = new Map();
+const lspNotifyHandlers = new Map();
+
+function lspSendReq(method, params) {
+  const id = lspRequestId++;
+  return new Promise((resolve, reject) => {
+    lspPending.set(id, { resolve, reject });
+    globalThis.lspSend(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+  });
+}
+function lspNotify(method, params) {
+  globalThis.lspSend(JSON.stringify({ jsonrpc: '2.0', method, params }));
+}
+function lspRangeToMonaco(r) {
+  return {
+    startLineNumber: r.start.line + 1, startColumn: r.start.character + 1,
+    endLineNumber:   r.end.line   + 1, endColumn:   r.end.character   + 1,
+  };
+}
+function monacoPosToLsp(p) {
+  return { line: p.lineNumber - 1, character: p.column - 1 };
 }
 
-// Analyzer (separate dart2wasm module). Failure is non-fatal — Run/Reload
-// don't depend on it.
-status.innerHTML = '<span class="info">loading analyzer…</span>';
-(async () => {
-  try {
-    const [m, analyzerWasm, sdkBuf] = await Promise.all([
-      import('./dart_analyzer.mjs' + CB),
-      fetch('dart_analyzer.wasm' + CB),
-      fetch('dart_sdk.sum' + CB).then(r => r.arrayBuffer()),
-    ]);
-    const inst = await (await m.compileStreaming(analyzerWasm)).instantiate({});
-    inst.invokeMain([]);
-    globalThis.dartAnalyzerInit(new Uint8Array(sdkBuf), packagesBundle);
-    runAnalysis();
-  } catch (e) {
-    $('diagCounts').innerHTML = '<span class="err">analyzer failed: ' +
-        String(e?.message ?? e) + '</span>';
+globalThis.lspReceive = (jsonText) => {
+  let m;
+  try { m = JSON.parse(jsonText); } catch { return; }
+  if (m.id !== undefined && (m.result !== undefined || m.error !== undefined)) {
+    const w = lspPending.get(m.id);
+    if (!w) return;
+    lspPending.delete(m.id);
+    m.error ? w.reject(m.error) : w.resolve(m.result);
+  } else if (m.method && m.id !== undefined) {
+    // Server->client request. Respond null to anything we don't handle.
+    globalThis.lspSend(JSON.stringify({ jsonrpc: '2.0', id: m.id, result: null }));
+  } else if (m.method) {
+    const h = lspNotifyHandlers.get(m.method);
+    if (h) h(m.params);
   }
-})();
+};
 
-const ANALYZER_OWNER = 'dart-analyzer';
-let analyzeTimer = 0;
-let analyzeSeq = 0;
-async function runAnalysis() {
-  if (typeof globalThis.dartAnalyze !== 'function') return;
-  const mySeq = ++analyzeSeq;
-  let raw;
-  try { raw = await globalThis.dartAnalyze(editor.getValue()); }
-  catch (e) {
-    $('diagCounts').innerHTML = '<span class="err">analyzer error</span>';
-    return;
-  }
-  if (mySeq !== analyzeSeq) return;  // a newer request superseded us
-  const items = JSON.parse(raw);
+function applyDiagnostics(items) {
   const sevMap = {
-    error: monaco.MarkerSeverity.Error,
-    warning: monaco.MarkerSeverity.Warning,
-    info: monaco.MarkerSeverity.Info,
+    1: monaco.MarkerSeverity.Error,
+    2: monaco.MarkerSeverity.Warning,
+    3: monaco.MarkerSeverity.Info,
+    4: monaco.MarkerSeverity.Hint,
   };
   const markers = items.map(d => ({
     severity: sevMap[d.severity] ?? monaco.MarkerSeverity.Info,
-    message: `${d.message} [${d.code}]`,
-    startLineNumber: d.startLine, startColumn: d.startColumn,
-    endLineNumber: d.endLine, endColumn: d.endColumn,
+    message: `${d.message}${d.code ? ` [${d.code}]` : ''}`,
+    ...lspRangeToMonaco(d.range),
   }));
-  monaco.editor.setModelMarkers(editor.getModel(), ANALYZER_OWNER, markers);
-  const errs = items.filter(d => d.severity === 'error').length;
-  const warns = items.filter(d => d.severity === 'warning').length;
+  monaco.editor.setModelMarkers(editor.getModel(), LSP_OWNER, markers);
+  const errs = items.filter(d => d.severity === 1).length;
+  const warns = items.filter(d => d.severity === 2).length;
   if (items.length === 0) {
     $('diagCounts').innerHTML = '<span class="ok">no issues</span>';
     $('diagFirst').textContent = '';
@@ -1345,18 +1371,165 @@ async function runAnalysis() {
       (errs && warns ? ' · ' : '') +
       (warns ? `<span class="warn">${warns} warning${warns===1?'':'s'}</span>` : '') +
       (!errs && !warns ? `<span class="info">${items.length} info</span>` : '');
-    const top = items.find(d => d.severity === 'error') ?? items[0];
-    $('diagFirst').textContent = `→ line ${top.startLine}: ${top.message}`;
+    const top = items.find(d => d.severity === 1) ?? items[0];
+    const line = top.range.start.line + 1, col = top.range.start.character + 1;
+    $('diagFirst').textContent = `→ line ${line}: ${top.message}`;
     $('diagFirst').onclick = () => {
-      editor.revealPositionInCenter({ lineNumber: top.startLine, column: top.startColumn });
-      editor.setPosition({ lineNumber: top.startLine, column: top.startColumn });
+      editor.revealPositionInCenter({ lineNumber: line, column: col });
+      editor.setPosition({ lineNumber: line, column: col });
       editor.focus();
     };
   }
 }
+lspNotifyHandlers.set('textDocument/publishDiagnostics', p => {
+  if (p?.uri === LSP_FILE_URI) applyDiagnostics(p.diagnostics ?? []);
+});
+
+(async () => {
+  try {
+    const [m, lspWasm, sdkBuf] = await Promise.all([
+      import('./dart_lsp.mjs' + CB),
+      fetch('dart_lsp.wasm' + CB),
+      fetch('dart_sdk.sum' + CB).then(r => r.arrayBuffer()),
+    ]);
+    const inst = await (await m.compileStreaming(lspWasm)).instantiate({});
+    inst.invokeMain();
+    globalThis.lspStart(new Uint8Array(sdkBuf), packagesBundle);
+    await lspSendReq('initialize', {
+      processId: null, rootUri: 'file:///user',
+      initializationOptions: {
+        completionBudgetMilliseconds: 5000,
+        suggestFromUnimportedLibraries: true,
+        onlyAnalyzeProjectsWithOpenFiles: false,
+        outline: true,
+      },
+      capabilities: {
+        textDocument: {
+          synchronization: { didOpen: true, didChange: true },
+          completion: {
+            completionItem: {
+              snippetSupport: false,
+              resolveSupport: { properties: ['additionalTextEdits', 'detail', 'documentation'] },
+            },
+          },
+          hover: { contentFormat: ['markdown', 'plaintext'] },
+          publishDiagnostics: { relatedInformation: false },
+        },
+        workspace: { applyEdit: true },
+      },
+      workspaceFolders: [{ uri: 'file:///user', name: 'user' }],
+    });
+    lspNotify('initialized', {});
+    lspNotify('textDocument/didOpen', {
+      textDocument: {
+        uri: LSP_FILE_URI, languageId: 'dart',
+        version: lspDocVersion, text: editor.getValue(),
+      },
+    });
+    // Warm up so the first user completion already has unimported-libs results.
+    for (let i = 0; i < 5; i++) {
+      try {
+        const r = await lspSendReq('textDocument/completion', {
+          textDocument: { uri: LSP_FILE_URI },
+          position: { line: 0, character: 0 },
+        });
+        if (r && r.isIncomplete === false) break;
+      } catch (_) { /* ignore */ }
+      await new Promise(r => setTimeout(r, 400));
+    }
+    lspReady = true;
+  } catch (e) {
+    $('diagCounts').innerHTML = '<span class="err">analyzer failed: ' +
+        String(e?.message ?? e) + '</span>';
+  }
+})();
+
 editor.onDidChangeModelContent(() => {
-  clearTimeout(analyzeTimer);
-  analyzeTimer = setTimeout(runAnalysis, 250);
+  if (!lspReady) return;
+  lspDocVersion += 1;
+  lspNotify('textDocument/didChange', {
+    textDocument: { uri: LSP_FILE_URI, version: lspDocVersion },
+    contentChanges: [{ text: editor.getValue() }],
+  });
+});
+
+function lspTextEditToMonaco(te) {
+  if (!te) return null;
+  const r = te.range ?? te.insert ?? te.replace;
+  if (!r) return null;
+  return { range: lspRangeToMonaco(r), text: te.newText };
+}
+
+monaco.languages.registerCompletionItemProvider('dart', {
+  triggerCharacters: ['.', '(', ',', "'", '"', ':', ' '],
+  async provideCompletionItems(model, position) {
+    if (!lspReady) return { suggestions: [] };
+    let r;
+    try {
+      r = await lspSendReq('textDocument/completion', {
+        textDocument: { uri: LSP_FILE_URI },
+        position: monacoPosToLsp(position),
+      });
+    } catch { return { suggestions: [] }; }
+    const items = r?.items ?? [];
+    const word = model.getWordUntilPosition(position);
+    const fallbackRange = {
+      startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
+      startColumn: word.startColumn, endColumn: word.endColumn,
+    };
+    const suggestions = items.map(it => {
+      const main = lspTextEditToMonaco(it.textEdit);
+      return {
+        label: it.label,
+        kind: it.kind ?? monaco.languages.CompletionItemKind.Variable,
+        insertText: it.textEdit?.newText ?? it.insertText ?? it.label,
+        detail: it.detail ?? '',
+        sortText: it.sortText,
+        filterText: it.filterText,
+        range: main?.range ?? fallbackRange,
+        _lsp: it,
+      };
+    });
+    return { suggestions, incomplete: !!r?.isIncomplete };
+  },
+  async resolveCompletionItem(item) {
+    const lsp_ = item._lsp;
+    if (!lsp_) return item;
+    try {
+      const resolved = await lspSendReq('completionItem/resolve', lsp_);
+      if (resolved.detail) item.detail = resolved.detail;
+      if (resolved.documentation) {
+        item.documentation = resolved.documentation?.value ?? resolved.documentation;
+      }
+      if (resolved.additionalTextEdits?.length) {
+        item.additionalTextEdits = resolved.additionalTextEdits
+            .map(lspTextEditToMonaco).filter(Boolean);
+      }
+    } catch { /* leave item as-is */ }
+    return item;
+  },
+});
+
+monaco.languages.registerHoverProvider('dart', {
+  async provideHover(model, position) {
+    if (!lspReady) return null;
+    let r;
+    try {
+      r = await lspSendReq('textDocument/hover', {
+        textDocument: { uri: LSP_FILE_URI },
+        position: monacoPosToLsp(position),
+      });
+    } catch { return null; }
+    if (!r) return null;
+    const contents = [];
+    if (r.contents?.value) contents.push({ value: r.contents.value });
+    else if (Array.isArray(r.contents)) {
+      for (const c of r.contents) contents.push({ value: c?.value ?? String(c) });
+    } else if (typeof r.contents === 'string') {
+      contents.push({ value: r.contents });
+    }
+    return { contents, range: r.range ? lspRangeToMonaco(r.range) : undefined };
+  },
 });
 
 status.innerHTML = '<span class="ok">ready</span>';
